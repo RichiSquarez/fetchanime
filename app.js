@@ -9,8 +9,10 @@
 
 // ── CONSTANTS ─────────────────────────────────────────────────
 
+// Public GraphQL endpoint — never put API keys in the URL path
 const ANILIST_URL = 'https://graphql.anilist.co';
 const RAWG_URL    = 'https://api.rawg.io/api';
+
 
 // Age cutoff: content must have started > 6 months ago
 const CUTOFF_DATE = (() => {
@@ -83,15 +85,55 @@ const S = {
 };
 
 // ── ANILIST HELPER ────────────────────────────────────────────
-async function gql(query, variables = {}) {
-  const r = await fetch(ANILIST_URL, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body:    JSON.stringify({ query, variables }),
-  });
-  if (!r.ok) throw new Error(`AniList ${r.status}`);
-  const json = await r.json();
-  if (json.errors) throw new Error(json.errors[0].message);
+function anilistHeaders() {
+  const headers = {
+    'Content-Type': 'application/json',
+    Accept:         'application/json',
+  };
+  // Optional OAuth access token (higher rate limits). Not required for public queries.
+  const token = document.getElementById('anilistToken')?.value.trim();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function gql(query, variables = {}, attempt = 0) {
+  let r;
+  try {
+    r = await fetch(ANILIST_URL, {
+      method:  'POST',
+      headers: anilistHeaders(),
+      body:    JSON.stringify({ query, variables }),
+    });
+  } catch (e) {
+    throw new Error(
+      `Network error (${e.message}). Open via a local server (e.g. python3 -m http.server 8080), not file://`
+    );
+  }
+
+  if (r.status === 429 && attempt < 3) {
+    const wait = (parseInt(r.headers.get('Retry-After'), 10) || 30) * 1000;
+    await sleep(wait);
+    return gql(query, variables, attempt + 1);
+  }
+
+  const text = await r.text();
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new Error(`AniList ${r.status}: invalid response (check the API URL)`);
+  }
+
+  if (!r.ok) {
+    const msg = json.errors?.[0]?.message ?? json.message ?? text.slice(0, 120);
+    throw new Error(`AniList ${r.status}: ${msg}`);
+  }
+  if (json.errors?.length) throw new Error(json.errors[0].message);
+  if (!json.data) throw new Error('AniList returned no data');
   return json.data;
 }
 
@@ -99,7 +141,7 @@ async function gql(query, variables = {}) {
 
 async function fetchAnime() {
   const q = `
-    query($cutoff: Int) {
+    query($cutoff: FuzzyDateInt) {
       Page(page: 1, perPage: 50) {
         media(
           type: ANIME
@@ -121,12 +163,14 @@ async function fetchAnime() {
       }
     }`;
   const d = await gql(q, { cutoff: CUTOFF_ANILIST });
-  return d.Page.media.filter(m => m.popularity > 4000);
+  const media = d.Page?.media ?? [];
+  if (!media.length) throw new Error('No anime returned — try again in a minute (rate limit)');
+  return media.filter(m => m.popularity > 4000);
 }
 
 async function fetchManga() {
   const q = `
-    query($cutoff: Int) {
+    query($cutoff: FuzzyDateInt) {
       Page(page: 1, perPage: 40) {
         media(
           type: MANGA
@@ -148,7 +192,9 @@ async function fetchManga() {
       }
     }`;
   const d = await gql(q, { cutoff: CUTOFF_ANILIST });
-  return d.Page.media.filter(m => m.popularity > 2000);
+  const media = d.Page?.media ?? [];
+  if (!media.length) throw new Error('No manga returned — try again in a minute (rate limit)');
+  return media.filter(m => m.popularity > 2000);
 }
 
 async function fetchCharacters() {
@@ -173,7 +219,9 @@ async function fetchCharacters() {
       }
     }`;
   const d = await gql(q);
-  return d.Page.characters.filter(
+  const chars = d.Page?.characters ?? [];
+  if (!chars.length) throw new Error('No characters returned — try again in a minute (rate limit)');
+  return chars.filter(
     c => c.favourites > 8000 && c.media?.nodes?.length > 0
   );
 }
@@ -627,13 +675,19 @@ function initUI() {
   document.getElementById('monthBadge').textContent = label;
   document.getElementById('packMonth').textContent  = label;
 
-  // Restore saved RAWG key
-  const saved = localStorage.getItem('fa_rawg_key') ?? '';
-  if (saved) document.getElementById('rawgKey').value = saved;
+  // Restore saved API keys
+  const savedRawg = localStorage.getItem('fa_rawg_key') ?? '';
+  if (savedRawg) document.getElementById('rawgKey').value = savedRawg;
 
-  // Save RAWG key on change
+  const savedAni = localStorage.getItem('fa_anilist_token') ?? '';
+  if (savedAni) document.getElementById('anilistToken').value = savedAni;
+
   document.getElementById('rawgKey').addEventListener('change', e => {
     localStorage.setItem('fa_rawg_key', e.target.value.trim());
+  });
+
+  document.getElementById('anilistToken').addEventListener('change', e => {
+    localStorage.setItem('fa_anilist_token', e.target.value.trim());
   });
 
   // Tabs
@@ -652,7 +706,10 @@ function initUI() {
     const btn = document.getElementById('refreshBtn');
     btn.disabled = true;
     btn.textContent = '↻ Loading…';
-    await Promise.allSettled([loadAnime(), loadManga(), loadCharacters(), loadGames()]);
+    await loadAnime();
+    await loadManga();
+    await loadCharacters();
+    await loadGames();
     btn.disabled = false;
     btn.textContent = '↻ Refresh Data';
     toast('Data refreshed');
@@ -693,13 +750,11 @@ function initUI() {
 
 async function init() {
   initUI();
-  // Load all four sources in parallel — each handles its own error
-  await Promise.allSettled([
-    loadAnime(),
-    loadManga(),
-    loadCharacters(),
-    loadGames(),
-  ]);
+  // AniList: sequential to avoid burst rate limits; RAWG can run in parallel
+  await loadAnime();
+  await loadManga();
+  await loadCharacters();
+  await loadGames();
 }
 
 document.addEventListener('DOMContentLoaded', init);

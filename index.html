@@ -22,9 +22,17 @@
         <span class="month-badge" id="monthBadge"></span>
         <input
           class="api-input"
+          id="anilistToken"
+          type="password"
+          placeholder="AniList token (optional)"
+          autocomplete="off"
+          title="OAuth access token only — not needed for rankings"
+        />
+        <input
+          class="api-input"
           id="rawgKey"
           type="text"
-          placeholder="RAWG API key (optional, rawg.io)"
+          placeholder="RAWG API key (optional)"
           autocomplete="off"
         />
         <button class="btn btn-primary" id="refreshBtn">↻ Refresh Data</button>
