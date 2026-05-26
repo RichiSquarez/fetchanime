@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FetchAnime — Content Intelligence</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ── HEADER ── -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="header-brand">
+        <span class="brand-icon">⛩</span>
+        <div>
+          <h1 class="brand-title">FetchAnime</h1>
+          <p class="brand-sub">Content Intelligence Dashboard</p>
+        </div>
+      </div>
+      <div class="header-controls">
+        <span class="month-badge" id="monthBadge"></span>
+        <input
+          class="api-input"
+          id="rawgKey"
+          type="text"
+          placeholder="RAWG API key (optional, rawg.io)"
+          autocomplete="off"
+        />
+        <button class="btn btn-primary" id="refreshBtn">↻ Refresh Data</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── STATS BAR ── -->
+  <div class="stats-bar">
+    <div class="stats-inner">
+      <div class="stat-item">
+        <span class="stat-value" id="statAnime">—</span>
+        <span class="stat-label">Anime Analyzed</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value" id="statGames">—</span>
+        <span class="stat-label">Games Found</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value" id="statChars">—</span>
+        <span class="stat-label">Characters Ranked</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value" id="statManga">—</span>
+        <span class="stat-label">Manga / Manhwa</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value">6 mo</span>
+        <span class="stat-label">Age Filter (min)</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── MAIN ── -->
+  <main class="container">
+
+    <!-- Tabs -->
+    <nav class="tabs">
+      <button class="tab active" data-tab="anime">Anime Series</button>
+      <button class="tab" data-tab="games">Anime Games</button>
+      <button class="tab" data-tab="characters">Characters</button>
+      <button class="tab" data-tab="manga">Manga / Manhwa</button>
+    </nav>
+
+    <!-- Anime -->
+    <div id="paneAnime" class="tab-pane active">
+      <div class="cards-grid" id="animeGrid">
+        <div class="state-msg"><span class="spinner"></span> Loading anime rankings…</div>
+      </div>
+    </div>
+
+    <!-- Games -->
+    <div id="paneGames" class="tab-pane">
+      <p class="rawg-note">
+        Data via <a href="https://rawg.io/apidocs" target="_blank">RAWG API</a>.
+        Paste your free key above for full results — works without a key at lower rate limits.
+      </p>
+      <div class="cards-grid" id="gamesGrid">
+        <div class="state-msg"><span class="spinner"></span> Loading games…</div>
+      </div>
+    </div>
+
+    <!-- Characters -->
+    <div id="paneCharacters" class="tab-pane">
+      <div class="cards-grid" id="charsGrid">
+        <div class="state-msg"><span class="spinner"></span> Loading top characters…</div>
+      </div>
+    </div>
+
+    <!-- Manga -->
+    <div id="paneManga" class="tab-pane">
+      <div class="cards-grid" id="mangaGrid">
+        <div class="state-msg"><span class="spinner"></span> Loading manga / manhwa…</div>
+      </div>
+    </div>
+
+    <!-- ── MONTHLY PACK ── -->
+    <section class="pack-section">
+      <div class="pack-header">
+        <div>
+          <h2 class="pack-title">Monthly Content Pack</h2>
+          <p class="pack-sub">14 niches for Romchik — <span id="packMonth"></span></p>
+        </div>
+        <div class="pack-actions">
+          <button class="btn btn-outline" id="exportBtn">Export JSON</button>
+          <button class="btn btn-outline" id="copyBtn">Copy Tasks</button>
+          <button class="btn btn-primary" id="generateBtn">Generate Pack</button>
+        </div>
+      </div>
+
+      <div class="pack-grid" id="packGrid">
+        <div class="pack-empty">
+          Click <strong>Generate Pack</strong> after data loads to create this month's 14 content tasks.
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
