@@ -140,12 +140,15 @@ async function gql(query, variables = {}, attempt = 0) {
 // ── DATA FETCHERS ─────────────────────────────────────────────
 
 async function fetchAnime() {
+  // TRENDING_DESC = ranked by current-week activity on AniList (watches, list adds, score updates).
+  // Combined with startDate_lesser this gives "established titles that are hot right now" —
+  // much more useful than POPULARITY_DESC (all-time accumulation, never changes).
   const q = `
     query($cutoff: FuzzyDateInt) {
       Page(page: 1, perPage: 50) {
         media(
           type: ANIME
-          sort: POPULARITY_DESC
+          sort: TRENDING_DESC
           averageScore_greater: 65
           startDate_lesser: $cutoff
           status_in: [FINISHED, RELEASING]
@@ -155,6 +158,7 @@ async function fetchAnime() {
           popularity
           favourites
           averageScore
+          trending
           genres
           coverImage { large }
           startDate { year month }
@@ -174,7 +178,7 @@ async function fetchManga() {
       Page(page: 1, perPage: 40) {
         media(
           type: MANGA
-          sort: POPULARITY_DESC
+          sort: TRENDING_DESC
           averageScore_greater: 65
           startDate_lesser: $cutoff
         ) {
@@ -183,6 +187,7 @@ async function fetchManga() {
           popularity
           favourites
           averageScore
+          trending
           genres
           coverImage { large }
           countryOfOrigin
@@ -198,10 +203,11 @@ async function fetchManga() {
 }
 
 async function fetchCharacters() {
-  // Top characters by favorites — inherently skews toward established series
+  // Fetch a large pool so the 70/30 gender split has enough candidates in each bucket.
+  // Two sequential pages to stay under rate limits.
   const q = `
-    {
-      Page(page: 1, perPage: 40) {
+    query($page: Int) {
+      Page(page: $page, perPage: 50) {
         characters(sort: FAVOURITES_DESC) {
           id
           name { full }
@@ -218,12 +224,41 @@ async function fetchCharacters() {
         }
       }
     }`;
-  const d = await gql(q);
-  const chars = d.Page?.characters ?? [];
-  if (!chars.length) throw new Error('No characters returned — try again in a minute (rate limit)');
-  return chars.filter(
-    c => c.favourites > 8000 && c.media?.nodes?.length > 0
-  );
+
+  const [d1, d2] = await Promise.all([
+    gql(q, { page: 1 }),
+    gql(q, { page: 2 }),
+  ]);
+
+  const raw = [
+    ...(d1.Page?.characters ?? []),
+    ...(d2.Page?.characters ?? []),
+  ];
+
+  if (!raw.length) throw new Error('No characters returned — try again in a minute (rate limit)');
+
+  return raw.filter(c => c.favourites > 8000 && c.media?.nodes?.length > 0);
+}
+
+// Split a scored character list into a 70% female / 30% male display set.
+// AniList gender values: "Female" | "Male" | "Non-binary" | null
+// null/unknown → treated as female bucket (most are unlabelled female chars).
+function genderSplit(chars, total) {
+  const scored = [...chars]
+    .map(c => ({ ...c, _score: scoreCharacter(c) }))
+    .sort((a, b) => b._score - a._score);
+
+  const female = scored.filter(c => (c.gender ?? 'Female').toLowerCase() !== 'male');
+  const male   = scored.filter(c => c.gender?.toLowerCase() === 'male');
+
+  const nFemale = Math.round(total * 0.7);  // 70 %
+  const nMale   = total - nFemale;          // 30 %
+
+  // Combine and re-sort so the grid is ranked by CPS, not gender
+  return [
+    ...female.slice(0, nFemale),
+    ...male.slice(0, Math.min(nMale, male.length)),
+  ].sort((a, b) => b._score - a._score);
 }
 
 async function fetchGames(apiKey) {
@@ -260,17 +295,21 @@ function genreScore(genres = []) {
 }
 
 function scoreAnime(item, maxPop) {
-  const pop    = Math.min(55, (item.popularity / maxPop) * 55);
+  const pop    = Math.min(45, (item.popularity / maxPop) * 45);
   const rating = ((item.averageScore ?? 70) / 100) * 25;
   const genre  = Math.min(20, genreScore(item.genres) * 0.45);
-  return Math.round(pop + rating + genre);
+  // trending rank: 1 = hottest right now, higher = less hot.
+  // Contributes up to 10 pts; drops to 0 around rank 100+.
+  const trend  = item.trending ? Math.max(0, 10 - Math.floor(item.trending / 10)) : 0;
+  return Math.round(pop + rating + genre + trend);
 }
 
 function scoreManga(item, maxPop) {
-  const pop    = Math.min(55, (item.popularity / maxPop) * 55);
+  const pop    = Math.min(45, (item.popularity / maxPop) * 45);
   const rating = ((item.averageScore ?? 70) / 100) * 25;
   const genre  = Math.min(20, genreScore(item.genres) * 0.45);
-  return Math.round(pop + rating + genre);
+  const trend  = item.trending ? Math.max(0, 10 - Math.floor(item.trending / 10)) : 0;
+  return Math.round(pop + rating + genre + trend);
 }
 
 function scoreCharacter(item) {
@@ -306,9 +345,10 @@ function generatePack() {
     .map(m => ({ ...m, _score: scoreManga(m, maxMnP), _t: 'manga' }))
     .sort((a, b) => b._score - a._score);
 
-  const chars = [...S.characters]
-    .map(c => ({ ...c, _score: scoreCharacter(c), _t: 'character' }))
-    .sort((a, b) => b._score - a._score);
+  // Characters: 2 female (70 %) + 1 male (30 %) for the 3-slot pack
+  const charsSplit = genderSplit(S.characters, 3)
+    .map(c => ({ ...c, _t: 'character' }));
+  const chars = charsSplit;
 
   const games = [...S.games]
     .map(g => ({ ...g, _score: scoreGame(g), _t: 'game' }))
@@ -445,6 +485,9 @@ function cardAnime(item, idx, maxPop) {
   const title  = item.title.english || item.title.romaji;
   const score  = scoreAnime(item, maxPop);
   const genres = (item.genres ?? []).slice(0, 2);
+  const trendTag = item.trending
+    ? `<span class="tag tag-trend">↑ Trend #${item.trending}</span>`
+    : '';
   return `
   <div class="content-card">
     <div class="card-rank">#${idx + 1}</div>
@@ -456,6 +499,7 @@ function cardAnime(item, idx, maxPop) {
         ${item.startDate?.year ? `<span class="tag tag-year">${item.startDate.year}</span>` : ''}
         ${genres.map(g => `<span class="tag tag-genre">${esc(g)}</span>`).join('')}
         <span class="tag tag-score">★ ${item.averageScore ?? '?'}</span>
+        ${trendTag}
       </div>
       <div class="card-pop">${item.popularity.toLocaleString()} fans</div>
       ${popBar(item.popularity, maxPop)}
@@ -464,10 +508,13 @@ function cardAnime(item, idx, maxPop) {
 }
 
 function cardManga(item, idx, maxPop) {
-  const title   = item.title.english || item.title.romaji;
-  const score   = scoreManga(item, maxPop);
-  const country = item.countryOfOrigin === 'KR' ? 'KR' : item.countryOfOrigin === 'CN' ? 'CN' : 'JP';
-  const genres  = (item.genres ?? []).slice(0, 2);
+  const title    = item.title.english || item.title.romaji;
+  const score    = scoreManga(item, maxPop);
+  const country  = item.countryOfOrigin === 'KR' ? 'KR' : item.countryOfOrigin === 'CN' ? 'CN' : 'JP';
+  const genres   = (item.genres ?? []).slice(0, 2);
+  const trendTag = item.trending
+    ? `<span class="tag tag-trend">↑ Trend #${item.trending}</span>`
+    : '';
   return `
   <div class="content-card">
     <div class="card-rank">#${idx + 1}</div>
@@ -479,6 +526,7 @@ function cardManga(item, idx, maxPop) {
         <span class="tag tag-year">${country} · ${item.startDate?.year ?? '?'}</span>
         ${genres.map(g => `<span class="tag tag-genre">${esc(g)}</span>`).join('')}
         <span class="tag tag-score">★ ${item.averageScore ?? '?'}</span>
+        ${trendTag}
       </div>
       <div class="card-pop">${item.popularity.toLocaleString()} readers</div>
       ${popBar(item.popularity, maxPop)}
@@ -487,10 +535,14 @@ function cardManga(item, idx, maxPop) {
 }
 
 function cardChar(item, idx) {
-  const score    = scoreCharacter(item);
+  const score     = scoreCharacter(item);
   const fromTitle = item.media?.nodes?.[0]?.title?.english
                   || item.media?.nodes?.[0]?.title?.romaji || '';
-  const MAX_FAV = 280000;
+  const MAX_FAV   = 280000;
+  const genderLow = (item.gender ?? '').toLowerCase();
+  const genderTag = item.gender
+    ? `<span class="tag ${genderLow === 'male' ? 'tag-male' : 'tag-female'}">${esc(item.gender)}</span>`
+    : `<span class="tag tag-female">Female</span>`;
   return `
   <div class="content-card">
     <div class="card-rank">#${idx + 1}</div>
@@ -499,7 +551,7 @@ function cardChar(item, idx) {
     <div class="card-body">
       <div class="card-title">${esc(item.name.full)}</div>
       <div class="card-tags">
-        ${item.gender ? `<span class="tag tag-year">${esc(item.gender)}</span>` : ''}
+        ${genderTag}
         ${fromTitle ? `<span class="tag tag-genre">${esc(fromTitle.length > 20 ? fromTitle.slice(0,19)+'…' : fromTitle)}</span>` : ''}
       </div>
       <div class="card-pop">♥ ${item.favourites.toLocaleString()} favorites</div>
@@ -611,12 +663,19 @@ async function loadCharacters() {
   gridLoading('charsGrid', 'Fetching top characters from AniList…');
   try {
     S.characters = await fetchCharacters();
+    // Apply 70 % female / 30 % male split for the display grid of 24 cards
+    const display = genderSplit(S.characters, 24);
     document.getElementById('charsGrid').innerHTML =
-      S.characters.slice(0, 24).map((c, i) => cardChar(c, i)).join('');
+      display.map((c, i) => cardChar(c, i)).join('');
+    const femaleCount = S.characters.filter(c => (c.gender ?? 'Female').toLowerCase() !== 'male').length;
+    const maleCount   = S.characters.filter(c => c.gender?.toLowerCase() === 'male').length;
     document.getElementById('statChars').textContent = S.characters.length;
+    document.getElementById('charGenderNote').textContent =
+      `Pool: ${femaleCount}F / ${maleCount}M — showing 70/30`;
   } catch (e) {
     gridError('charsGrid', e.message);
     document.getElementById('statChars').textContent = 'Err';
+    document.getElementById('charGenderNote').textContent = '';
   }
 }
 
