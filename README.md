@@ -33,6 +33,8 @@ Deploys as a static site — no build step, no server, works on GitHub Pages.
 
    Each task card includes: thumbnail, why it was selected, 3 content ideas, priority level (HIGH / MEDIUM).
 
+   **Next Pack** walks one block further down every ranked pool, producing the next 14 niches with no overlap with the previous pack. **Generate Pack** resets back to the top pack.
+
 5. **Export options**:
    - **Copy Tasks** — full pack as plain text
    - **Export JSON** — structured pack

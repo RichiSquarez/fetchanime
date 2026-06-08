@@ -82,6 +82,7 @@ const S = {
   characters: [],
   games:      [],
   pack:       [],
+  packPage:   0,   // 0 = top pack; each "Next Pack" walks further down the rankings
 };
 
 // ── ANILIST HELPER ────────────────────────────────────────────
@@ -443,7 +444,7 @@ function charNames(item) {
   return (item.characters?.nodes ?? []).map(c => c.name?.full).filter(Boolean);
 }
 
-function generatePack() {
+function generatePack(page = 0) {
   const maxAnP = Math.max(...S.anime.map(a => a.popularity), 1);
   const maxMnP = Math.max(...S.manga.map(m => m.popularity), 1);
 
@@ -455,19 +456,22 @@ function generatePack() {
     .map(m => ({ ...m, _score: scoreManga(m, maxMnP), _t: 'manga' }))
     .sort((a, b) => b._score - a._score);
 
-  // Characters: 2 female (70 %) + 1 male (30 %) for the 3-slot pack
-  const charsSplit = genderSplit(S.characters, 3)
+  // Full character ranking with the 70/30 gender balance — paginated below.
+  const chars = genderSplit(S.characters, S.characters.length)
     .map(c => ({ ...c, _t: 'character' }));
-  const chars = charsSplit;
 
   const games = [...S.games]
     .map(g => ({ ...g, _score: scoreGame(g), _t: 'game' }))
     .sort((a, b) => b._score - a._score);
 
+  // Page offsets — each "Next Pack" advances one block down every ranked pool.
+  const aOff = page * 5, cOff = page * 3, gOff = page * 3, mOff = page * 2;
+  const highOK = page === 0;   // HIGH priority is reserved for the top pack
+
   const pack = [];
 
   // ── 5 Anime series
-  anime.slice(0, 5).forEach((item, i) => {
+  anime.slice(aOff, aOff + 5).forEach((item, i) => {
     const title = item.title.english || item.title.romaji;
     pack.push({
       type:     'anime',
@@ -476,14 +480,14 @@ function generatePack() {
       score:    item._score,
       reason:   `${item.popularity.toLocaleString()} fans · ★ ${item.averageScore ?? '?'} · ${(item.genres ?? []).slice(0, 2).join(', ')}`,
       ideas:    [pick(IDEAS.anime, title, 0), pick(IDEAS.anime, title, 1), pick(IDEAS.anime, title, 2)],
-      priority: i < 2 ? 'HIGH' : 'MEDIUM',
+      priority: highOK && i < 2 ? 'HIGH' : 'MEDIUM',
       url:      item.siteUrl,
       names:    charNames(item),
     });
   });
 
   // ── 3 Characters
-  chars.slice(0, 3).forEach((item, i) => {
+  chars.slice(cOff, cOff + 3).forEach((item, i) => {
     const name   = item.name.full;
     const source = item.media?.nodes?.[0]?.title?.english
                 || item.media?.nodes?.[0]?.title?.romaji
@@ -496,13 +500,13 @@ function generatePack() {
       score:    item._score,
       reason:   `${item.favourites.toLocaleString()} favorites on AniList`,
       ideas:    [pick(IDEAS.character, name, 0), pick(IDEAS.character, name, 1), pick(IDEAS.character, name, 2)],
-      priority: i === 0 ? 'HIGH' : 'MEDIUM',
+      priority: highOK && i === 0 ? 'HIGH' : 'MEDIUM',
       names:    [name],
     });
   });
 
   // ── 3 Games
-  games.slice(0, 3).forEach((item, i) => {
+  games.slice(gOff, gOff + 3).forEach((item, i) => {
     const title = item.name;
     pack.push({
       type:     'game',
@@ -511,12 +515,12 @@ function generatePack() {
       score:    item._score,
       reason:   `${(item.added ?? 0).toLocaleString()} RAWG players · Metacritic ${item.metacritic ?? 'N/A'}`,
       ideas:    [pick(IDEAS.game, title, 0), pick(IDEAS.game, title, 1), pick(IDEAS.game, title, 2)],
-      priority: i === 0 ? 'HIGH' : 'MEDIUM',
+      priority: highOK && i === 0 ? 'HIGH' : 'MEDIUM',
     });
   });
 
   // ── 2 Manga / Manhwa
-  manga.slice(0, 2).forEach(item => {
+  manga.slice(mOff, mOff + 2).forEach(item => {
     const title   = item.title.english || item.title.romaji;
     const country = item.countryOfOrigin === 'KR' ? 'Manhwa' : item.countryOfOrigin === 'CN' ? 'Manhua' : 'Manga';
     pack.push({
@@ -533,11 +537,12 @@ function generatePack() {
     });
   });
 
-  // ── 1 Wildcard (highest score from remaining pool)
+  // ── 1 Wildcard (highest score from beyond the *next* page, so consecutive
+  //    packs never share an item — the next page's main slots are skipped).
   const rest = [
-    ...anime.slice(5, 15),
-    ...chars.slice(3, 10),
-    ...games.slice(3, 8),
+    ...anime.slice(aOff + 10, aOff + 20),
+    ...chars.slice(cOff + 6, cOff + 13),
+    ...games.slice(gOff + 6, gOff + 11),
   ].sort((a, b) => b._score - a._score);
 
   if (rest[0]) {
@@ -572,6 +577,7 @@ function generatePack() {
   }
 
   S.pack = pack;
+  S.packPage = page;
   return pack;
 }
 
@@ -867,6 +873,16 @@ function toast(msg) {
   setTimeout(() => el.classList.remove('show'), 2200);
 }
 
+// Render the current pack into the grid and reflect the page in the subtitle.
+function renderPack(pack) {
+  document.getElementById('packGrid').innerHTML =
+    pack.map((item, i) => cardTask(item, i + 1)).join('');
+  const label = `${MONTHS[NOW.getMonth()]} ${NOW.getFullYear()}`;
+  const tag   = S.packPage > 0 ? ` · Pack #${S.packPage + 1}` : '';
+  const el    = document.getElementById('packMonth');
+  if (el) el.textContent = label + tag;
+}
+
 // ── INIT ──────────────────────────────────────────────────────
 
 function initUI() {
@@ -914,14 +930,27 @@ function initUI() {
     toast('Data refreshed');
   });
 
-  // Generate pack
+  // Generate pack (resets to the top pack — page 0)
   document.getElementById('generateBtn').addEventListener('click', () => {
     const hasData = S.anime.length || S.characters.length || S.manga.length || S.games.length;
     if (!hasData) { toast('Wait for data to load first'); return; }
-    const pack = generatePack();
-    document.getElementById('packGrid').innerHTML =
-      pack.map((item, i) => cardTask(item, i + 1)).join('');
+    const pack = generatePack(0);
+    renderPack(pack);
     toast(`Pack generated — ${pack.length} niches`);
+  });
+
+  // Next pack — the next 14 niches further down the rankings
+  document.getElementById('nextPackBtn').addEventListener('click', () => {
+    if (!S.pack.length) { toast('Generate a pack first'); return; }
+    const prevPage = S.packPage;
+    const pack = generatePack(prevPage + 1);
+    if (!pack.length) {
+      generatePack(prevPage);   // restore current pack state, grid unchanged
+      toast('No more niches — reached the bottom of the pool');
+      return;
+    }
+    renderPack(pack);
+    toast(`Pack #${S.packPage + 1} — ${pack.length} niches`);
   });
 
   // Copy
@@ -958,9 +987,10 @@ function initUI() {
       if (!text) { toast('No names resolved'); return; }
       const blob = new Blob([text + '\n'], { type: 'text/plain' });
       const url  = URL.createObjectURL(blob);
+      const suffix = S.packPage > 0 ? `-p${S.packPage + 1}` : '';
       const a    = Object.assign(document.createElement('a'), {
         href:     url,
-        download: `fetchanime-names-${NOW.getFullYear()}-${String(NOW.getMonth()+1).padStart(2,'0')}.txt`,
+        download: `fetchanime-names-${NOW.getFullYear()}-${String(NOW.getMonth()+1).padStart(2,'0')}${suffix}.txt`,
       });
       a.click();
       URL.revokeObjectURL(url);
