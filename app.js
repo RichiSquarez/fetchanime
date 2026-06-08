@@ -163,6 +163,9 @@ async function fetchAnime() {
           coverImage { large }
           startDate { year month }
           siteUrl
+          characters(role: MAIN, sort: [FAVOURITES_DESC], perPage: 5) {
+            nodes { name { full } }
+          }
         }
       }
     }`;
@@ -193,6 +196,9 @@ async function fetchManga() {
           countryOfOrigin
           startDate { year }
           siteUrl
+          characters(role: MAIN, sort: [FAVOURITES_DESC], perPage: 5) {
+            nodes { name { full } }
+          }
         }
       }
     }`;
@@ -288,6 +294,105 @@ async function fetchGames(apiKey) {
   return results;
 }
 
+// ── GAME CHARACTER RESOLUTION ─────────────────────────────────
+// RAWG has no character data, and no free CORS-friendly game-character API
+// exists. So games resolve names in two steps:
+//   1. Curated map below (the universes that matter for this niche).
+//   2. Fallback: AniList anime-adaptation main characters (only if >= 3 found).
+// Maintenance: when a game drops a notable new unit, add it here (~5 min/quarter).
+const GAME_CHARS = {
+  'Genshin Impact':        ['Raiden Shogun', 'Hu Tao', 'Ganyu', 'Yae Miko', 'Nahida', 'Furina', 'Yelan', 'Eula'],
+  'Honkai Star Rail':      ['Kafka', 'Silver Wolf', 'Firefly', 'Jingliu', 'Black Swan', 'Acheron', 'Robin', 'Castorice'],
+  'Zenless Zone Zero':     ['Ellen Joe', 'Miyabi', 'Jane Doe', 'Burnice', 'Zhu Yuan', 'Nicole Demara', 'Yixuan'],
+  'Honkai Impact 3rd':     ['Kiana Kaslana', 'Raiden Mei', 'Bronya Zaychik', 'Elysia', 'Seele Vollerei'],
+  'Wuthering Waves':       ['Jinhsi', 'Changli', 'Yinlin', 'Camellya', 'Carlotta', 'Shorekeeper'],
+  'Nikke':                 ['Rapi', 'Anis', 'Neon', 'Scarlet', 'Modernia', 'Red Hood'],
+  'Blue Archive':          ['Hoshino', 'Shiroko', 'Hina', 'Mika', 'Arisu', 'Yuuka'],
+  'Azur Lane':             ['Enterprise', 'Belfast', 'Atago', 'Taihou', 'Bremerton', 'Formidable'],
+  'Arknights':             ['Amiya', 'Texas', 'Exusiai', 'Skadi', 'Surtr', 'Nian'],
+  'Fate Grand Order':      ['Mash Kyrielight', 'Artoria Pendragon', 'Jeanne d\'Arc', 'Scathach', 'Tamamo no Mae', 'Ishtar'],
+  'Granblue Fantasy':      ['Djeeta', 'Narmaya', 'Zooey', 'Ferry', 'Cagliostro'],
+  'Princess Connect':      ['Pecorine', 'Kyaru', 'Kokkoro', 'Karyl'],
+  'Punishing Gray Raven':  ['Lucia', 'Liv', 'Bianca', 'Karenina'],
+  'Goddess of Victory Nikke': ['Rapi', 'Anis', 'Neon', 'Scarlet', 'Modernia', 'Red Hood'],
+  'NieR Automata':         ['2B', 'A2', '9S'],
+  'Stellar Blade':         ['Eve', 'Adam', 'Lily'],
+  'Persona 5':             ['Makoto Niijima', 'Ann Takamaki', 'Futaba Sakura', 'Kasumi Yoshizawa'],
+  'Persona 3':             ['Aigis', 'Mitsuru Kirijo', 'Yukari Takeba'],
+  'Final Fantasy VII':     ['Tifa Lockhart', 'Aerith Gainsborough', 'Yuffie Kisaragi'],
+  'Final Fantasy X':       ['Yuna', 'Rikku', 'Lulu'],
+  'Tales of Arise':        ['Shionne', 'Rinwell', 'Kisara'],
+  'Street Fighter':        ['Chun-Li', 'Cammy', 'Juri'],
+  'Guilty Gear':           ['Bridget', 'Jack-O', 'Baiken', 'Dizzy'],
+  'Overwatch':             ['D.Va', 'Widowmaker', 'Mercy', 'Kiriko'],
+  'League of Legends':     ['Ahri', 'Jinx', 'Lux', 'Evelynn'],
+};
+
+function normalizeGameKey(s = '') {
+  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Pre-normalized lookup index, built once.
+const GAME_CHARS_IDX = Object.fromEntries(
+  Object.entries(GAME_CHARS).map(([k, v]) => [normalizeGameKey(k), v])
+);
+
+// Match a RAWG game title (which may carry subtitles/editions like
+// "Persona 5 Royal" or "Final Fantasy VII Remake") against the curated map.
+// Strategy: exact normalized hit, else the longest canonical key contained
+// in the game name (longest wins so "final fantasy vii" beats "final fantasy").
+function lookupGameMap(name) {
+  const n = normalizeGameKey(name);
+  if (GAME_CHARS_IDX[n]) return GAME_CHARS_IDX[n];
+  let best = null, bestLen = 0;
+  for (const key of Object.keys(GAME_CHARS_IDX)) {
+    if (n.includes(key) && key.length > bestLen) {
+      best = GAME_CHARS_IDX[key];
+      bestLen = key.length;
+    }
+  }
+  return best;
+}
+
+const GAME_FALLBACK_QUERY = `
+  query($s: String) {
+    Page(page: 1, perPage: 1) {
+      media(search: $s, type: ANIME, sort: SEARCH_MATCH) {
+        characters(role: MAIN, sort: [FAVOURITES_DESC], perPage: 5) {
+          nodes { name { full } }
+        }
+      }
+    }
+  }`;
+
+// Search variants for the AniList fallback: full RAWG title plus a "base" title
+// with the subtitle/edition stripped. RAWG names like "Sword Art Online: Last
+// Recollection" don't match the anime, but "Sword Art Online" does.
+function gameSearchVariants(name) {
+  const full = String(name).trim();
+  const base = full.split(/\s*[:\-–—]\s*/)[0].trim();   // text before first colon/dash
+  return base && base.toLowerCase() !== full.toLowerCase() ? [full, base] : [full];
+}
+
+// Resolve a game's character names: curated map first, AniList adaptation second.
+// Returns [] if neither yields a usable roster (caller simply skips the game).
+async function resolveGameCharacters(name) {
+  const mapped = lookupGameMap(name);
+  if (mapped) return mapped.slice(0, 6);
+
+  for (const variant of gameSearchVariants(name)) {
+    try {
+      const d = await gql(GAME_FALLBACK_QUERY, { s: variant });
+      const nodes = d.Page?.media?.[0]?.characters?.nodes ?? [];
+      // Promo shorts (Genshin/HSR/ZZZ adaptations) return 1-2 chars — skip those.
+      if (nodes.length >= 3) return nodes.slice(0, 5).map(c => c.name.full).filter(Boolean);
+    } catch (_) {
+      // Network/rate-limit on a single game shouldn't fail the whole export.
+    }
+  }
+  return [];
+}
+
 // ── SCORING ───────────────────────────────────────────────────
 
 function genreScore(genres = []) {
@@ -333,6 +438,11 @@ function pick(ideas, name, i) {
   return ideas[i % ideas.length](name);
 }
 
+// Top main-character names attached to an anime/manga item by the GraphQL query.
+function charNames(item) {
+  return (item.characters?.nodes ?? []).map(c => c.name?.full).filter(Boolean);
+}
+
 function generatePack() {
   const maxAnP = Math.max(...S.anime.map(a => a.popularity), 1);
   const maxMnP = Math.max(...S.manga.map(m => m.popularity), 1);
@@ -368,6 +478,7 @@ function generatePack() {
       ideas:    [pick(IDEAS.anime, title, 0), pick(IDEAS.anime, title, 1), pick(IDEAS.anime, title, 2)],
       priority: i < 2 ? 'HIGH' : 'MEDIUM',
       url:      item.siteUrl,
+      names:    charNames(item),
     });
   });
 
@@ -386,6 +497,7 @@ function generatePack() {
       reason:   `${item.favourites.toLocaleString()} favorites on AniList`,
       ideas:    [pick(IDEAS.character, name, 0), pick(IDEAS.character, name, 1), pick(IDEAS.character, name, 2)],
       priority: i === 0 ? 'HIGH' : 'MEDIUM',
+      names:    [name],
     });
   });
 
@@ -417,6 +529,7 @@ function generatePack() {
       ideas:    [pick(IDEAS.manga, title, 0), pick(IDEAS.manga, title, 1), pick(IDEAS.manga, title, 2)],
       priority: 'MEDIUM',
       url:      item.siteUrl,
+      names:    charNames(item),
     });
   });
 
@@ -436,6 +549,7 @@ function generatePack() {
         type: 'anime', title, image: w.coverImage?.large, score: w._score,
         reason: `Wildcard · ${w.popularity.toLocaleString()} fans · high content score`,
         ideas: [pick(IDEAS.anime, title, 3), pick(IDEAS.anime, title, 4), pick(IDEAS.anime, title, 0)],
+        names: charNames(w),
       };
     } else if (w._t === 'character') {
       const name = w.name.full;
@@ -444,6 +558,7 @@ function generatePack() {
         type: 'character', title: name, subtitle: `from ${src}`, image: w.image?.large, score: w._score,
         reason: `Wildcard · ${w.favourites.toLocaleString()} favorites`,
         ideas: [pick(IDEAS.character, name, 0), pick(IDEAS.character, name, 1), pick(IDEAS.character, name, 2)],
+        names: [name],
       };
     } else {
       const title = w.name;
@@ -718,6 +833,31 @@ function packToJSON() {
   }, null, 2);
 }
 
+// Flat character-name list for generation — one name per line, deduped.
+// Anime/manga contribute their top main characters; the Characters slots
+// contribute their own name; games resolve via map/AniList fallback.
+async function packToNames() {
+  const collected = [];
+  for (const item of S.pack) {
+    if (item.type === 'game') {
+      collected.push(...await resolveGameCharacters(item.title));
+    } else if (Array.isArray(item.names)) {
+      collected.push(...item.names);
+    }
+  }
+
+  const seen = new Set();
+  const out  = [];
+  for (const raw of collected) {
+    const name = String(raw).trim();
+    const key  = name.toLowerCase();
+    if (!name || seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+  return out.join('\n');
+}
+
 // ── TOAST ─────────────────────────────────────────────────────
 
 function toast(msg) {
@@ -804,6 +944,33 @@ function initUI() {
     a.click();
     URL.revokeObjectURL(url);
     toast('JSON exported');
+  });
+
+  // Save names (.txt — one character name per line, for generation)
+  document.getElementById('saveNamesBtn').addEventListener('click', async () => {
+    if (!S.pack.length) { toast('Generate a pack first'); return; }
+    const btn  = document.getElementById('saveNamesBtn');
+    const prev = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Resolving…';
+    try {
+      const text = await packToNames();
+      if (!text) { toast('No names resolved'); return; }
+      const blob = new Blob([text + '\n'], { type: 'text/plain' });
+      const url  = URL.createObjectURL(blob);
+      const a    = Object.assign(document.createElement('a'), {
+        href:     url,
+        download: `fetchanime-names-${NOW.getFullYear()}-${String(NOW.getMonth()+1).padStart(2,'0')}.txt`,
+      });
+      a.click();
+      URL.revokeObjectURL(url);
+      toast(`Saved ${text.split('\n').length} names`);
+    } catch (e) {
+      toast(`Save failed: ${e.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prev;
+    }
   });
 }
 

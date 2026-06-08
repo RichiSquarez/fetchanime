@@ -33,7 +33,10 @@ Deploys as a static site — no build step, no server, works on GitHub Pages.
 
    Each task card includes: thumbnail, why it was selected, 3 content ideas, priority level (HIGH / MEDIUM).
 
-5. **Export options**: copy as plain text or download as JSON.
+5. **Export options**:
+   - **Copy Tasks** — full pack as plain text
+   - **Export JSON** — structured pack
+   - **Save Names** — flat `.txt` list of character names (one per line) for generation prompts. Anime/manga contribute their top-5 main characters (pulled in the same AniList query); Characters slots contribute their own name; games resolve via a curated character map with an AniList anime-adaptation fallback. Names are deduplicated.
 
 ---
 
